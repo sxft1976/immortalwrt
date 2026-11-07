@@ -55,7 +55,7 @@ jobs:
 
     - name: Clone Source Code to tmpfs
       run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH /tmpfs/openwrt
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH $GITHUB_WORKSPACE/tmpfs/openwrt
         cd $GITHUB_WORKSPACE/tmpfs/openwrt
         cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
         echo ">>> Injecting custom IP: 192.168.1.129"
