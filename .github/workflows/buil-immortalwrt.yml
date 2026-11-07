@@ -18,8 +18,8 @@ jobs:
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-
-  - name: Ultimate Environment Setup (Clean + Swap + tmpfs)
+    
+    - name: Ultimate Environment Setup (Clean + Swap + tmpfs)
   env:
     DEBIAN_FRONTEND: noninteractive
   run: |
