@@ -41,7 +41,7 @@ jobs:
         sudo swapon /swapfile
 
         # 3. Mount tmpfs for fast build
-        mkdir -p /tmpfs
+        mkdir -p $GITHUB_WORKSPACE/tmpfs
         sudo mount -t tmpfs -o size=100% tmpfs /tmpfs
 
         echo ">>> Setup done"
