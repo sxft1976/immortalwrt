@@ -1,4 +1,4 @@
-name: Build ImmortalWrt (Ultimate Edition)
+name: Build ImmortalWrt (Ultimate DD Edition)
 
 on:
   watch:
@@ -7,9 +7,9 @@ on:
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
-  REPO_BRANCH: openwrt-24.10 # 建议用24.10，25.12还在开发中容易报错
+  REPO_BRANCH: openwrt-24.10
   CONFIG_FILE: .config
-  MAKE_JOBS: -j2
+  MAKE_JOBS: -j$(nproc)
 
 jobs:
   build:
@@ -23,93 +23,59 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        echo ">>> 1. 清理前磁盘空间"
+        echo ">>> 1. Clean disk space"
         df -h
-        
-        # 1. 暴力删除预装垃圾（腾出 40GB+ 物理空间）
+
+        # 1. Remove pre-installed garbage (free 40GB+)
         sudo rm -rf /usr/lib/jvm /usr/local/lib/android /usr/local/share/powershell
-        sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc
-        sudo rm -rf /opt/hostedtoolcache # 【关键】清理预装的Node/Python缓存，防爆盘
-        sudo apt-get -qq autoremove --purge
-        sudo apt-get -qq clean
-        
-        # 2. 创建 30GB Swap 虚拟内存兜底
-        sudo fallocate -l 30G /swapfile
+        sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/share/boost
+        sudo rm -rf /opt/hostedtoolcache
+
+        # 2. Use dd to create Swap, avoid "Text file busy"
+        sudo swapoff -a || true
+        sudo rm -f /swapfile
+        echo ">>> Creating 30G Swap with dd (please wait)..."
+        sudo dd if=/dev/zero of=/swapfile bs=1M count=30720 status=progress
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
-        
-        # 3. 创建 50GB tmpfs 内存盘（极速读写）
-        mkdir -p /tmp/build_dir
-        sudo mount -t tmpfs -o size=100% tmpfs /tmp/build_dir
-        
-        echo ">>> 2. 清理后及 tmpfs 内存盘空间"
+
+        # 3. Mount tmpfs for fast build
+        mkdir -p /tmpfs
+        sudo mount -t tmpfs -o size=100% tmpfs /tmpfs
+
+        echo ">>> Setup done"
         df -h
         free -h
-        
-        # 4. 安装编译依赖
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/nxhack/openwrt-github-actions/main/depends-ubuntu-2204)
-        sudo timedatectl set-timezone "$TZ"
 
     - name: Clone Source Code to tmpfs
       run: |
-        # 关键：直接把源码克隆到内存盘
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH /dev/shm/openwrt
-        
-    - name: Inject Custom IP Script
-      run: |
-        # 【终极修复】直接修改源码底层文件，100%确保出厂IP为 192.168.1.129
-        cd /dev/shm/openwrt
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH /tmpfs/openwrt
+        cd /tmpfs/openwrt
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
+        echo ">>> Injecting custom IP: 192.168.1.129"
         sed -i 's/192.168.1.1/192.168.1.129/g' package/base-files/files/bin/config_generate
-        
-    - name: Update Feeds & Install
+        sed -i 's/192.168.1.1/192.168.1.129/g' package/base-files/luci2/bin/config_generate || true
+
+    - name: Download Feeds & Compile
       run: |
-        cd /dev/shm/openwrt
+        cd /tmpfs/openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        
-    - name: Load Configuration
-      run: |
-        cp $GITHUB_WORKSPACE/$CONFIG_FILE /dev/shm/openwrt/.config
-        
-    - name: Make Defconfig
-      run: |
-        cd /dev/shm/openwrt
-        make defconfig
-        
-    - name: Download Packages
-      run: |
-        cd /dev/shm/openwrt
         make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        make -j$(nproc) || make -j1 V=s
 
-    - name: Compile Firmware
+    - name: Extract Firmware
       run: |
-        cd /dev/shm/openwrt
-        echo "CONFIG_DEVEL=y" >> .config
-        echo "CONFIG_CCACHE=y" >> .config
-        # 多线程编译，失败自动降级单线程并输出详细日志
-        make $MAKE_JOBS || make -j1 V=s
-        
-    - name: Prepare Artifacts
-      run: |
-        # 将产物从内存盘拷回普通目录，防止任务结束数据丢失
-        mkdir -p upload/bin
-        cp /dev/shm/openwrt/bin/targets/*/*/*.bin upload/bin/ 2>/dev/null || true
-        cp /dev/shm/openwrt/bin/targets/*/*/*.iso upload/bin/ 2>/dev/null || true
-        cp /dev/shm/openwrt/bin/targets/*/*/*.vmdk upload/bin/ 2>/dev/null || true
-        cp /dev/shm/openwrt/bin/targets/*/*/*.img.gz upload/bin/ 2>/dev/null || true
-        cp /dev/shm/openwrt/bin/targets/*/*/packages/*.ipk upload/bin/ 2>/dev/null || true
-        cp /dev/shm/openwrt/.config upload/bin/config_backup
-        
-    - name: Upload to Release
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.event_name == 'watch'
+        mkdir -p /tmpfs/firmware
+        cp /tmpfs/openwrt/bin/targets/*/*/*.bin /tmpfs/firmware/ || true
+        cp /tmpfs/openwrt/bin/targets/*/*/*.img.gz /tmpfs/firmware/ || true
+        cp /tmpfs/openwrt/bin/targets/*/*/*.iso /tmpfs/firmware/ || true
+        cp /tmpfs/openwrt/bin/targets/*/*/*.vmdk /tmpfs/firmware/ || true
+        cp /tmpfs/openwrt/.config /tmpfs/firmware/build.config
+
+    - name: Upload Firmware Artifact
+      uses: actions/upload-artifact@v4
       with:
-        name: ImmortalWrt Build ${{ env.REPO_BRANCH }}
-        tag_name: immortalwrt-${{ github.run_number }}
-        files: upload/bin/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: ImmortalWrt-Firmware-Ultimate
+        path: /tmpfs/firmware/*
