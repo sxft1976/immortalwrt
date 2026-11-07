@@ -44,6 +44,7 @@ jobs:
         # 不再尝试在根目录 / 下创建文件夹
         mkdir -p $GITHUB_WORKSPACE/tmpfs
         sudo mount -t tmpfs -o size=100% tmpfs $GITHUB_WORKSPACE/tmpfs
+        sudo chmod 777 $GITHUB_WORKSPACE/tmpfs
         # 4. 验证环境
         echo ">>> Swap 状态:"
         free -h
