@@ -1,0 +1,113 @@
+name: Build ImmortalWrt (Ultimate Edition)
+
+on:
+  watch:
+    types: [started]
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10 # 建议用24.10，25.12还在开发中容易报错
+  CONFIG_FILE: .config
+  MAKE_JOBS: -j2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Ultimate Environment Setup (Clean + Swap + tmpfs)
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        echo ">>> 1. 清理前磁盘空间"
+        df -h
+        
+        # 1. 暴力删除预装垃圾（腾出 40GB+ 物理空间）
+        sudo rm -rf /usr/lib/jvm /usr/local/lib/android /usr/local/share/powershell
+        sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache # 【关键】清理预装的Node/Python缓存，防爆盘
+        sudo apt-get -qq autoremove --purge
+        sudo apt-get -qq clean
+        
+        # 2. 创建 30GB Swap 虚拟内存兜底
+        sudo fallocate -l 30G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        
+        # 3. 创建 50GB tmpfs 内存盘（极速读写）
+        sudo mount -t tmpfs -o size=50G tmpfs /dev/shm
+        
+        echo ">>> 2. 清理后及 tmpfs 内存盘空间"
+        df -h
+        
+        # 4. 安装编译依赖
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL https://raw.githubusercontent.com/nxhack/openwrt-github-actions/main/depends-ubuntu-2204)
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Clone Source Code to tmpfs
+      run: |
+        # 关键：直接把源码克隆到内存盘
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH /dev/shm/openwrt
+        
+    - name: Inject Custom IP Script
+      run: |
+        # 【终极修复】直接修改源码底层文件，100%确保出厂IP为 192.168.1.129
+        cd /dev/shm/openwrt
+        sed -i 's/192.168.1.1/192.168.1.129/g' package/base-files/files/bin/config_generate
+        
+    - name: Update Feeds & Install
+      run: |
+        cd /dev/shm/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        
+    - name: Load Configuration
+      run: |
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE /dev/shm/openwrt/.config
+        
+    - name: Make Defconfig
+      run: |
+        cd /dev/shm/openwrt
+        make defconfig
+        
+    - name: Download Packages
+      run: |
+        cd /dev/shm/openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile Firmware
+      run: |
+        cd /dev/shm/openwrt
+        echo "CONFIG_DEVEL=y" >> .config
+        echo "CONFIG_CCACHE=y" >> .config
+        # 多线程编译，失败自动降级单线程并输出详细日志
+        make $MAKE_JOBS || make -j1 V=s
+        
+    - name: Prepare Artifacts
+      run: |
+        # 将产物从内存盘拷回普通目录，防止任务结束数据丢失
+        mkdir -p upload/bin
+        cp /dev/shm/openwrt/bin/targets/*/*/*.bin upload/bin/ 2>/dev/null || true
+        cp /dev/shm/openwrt/bin/targets/*/*/*.iso upload/bin/ 2>/dev/null || true
+        cp /dev/shm/openwrt/bin/targets/*/*/*.vmdk upload/bin/ 2>/dev/null || true
+        cp /dev/shm/openwrt/bin/targets/*/*/*.img.gz upload/bin/ 2>/dev/null || true
+        cp /dev/shm/openwrt/bin/targets/*/*/packages/*.ipk upload/bin/ 2>/dev/null || true
+        cp /dev/shm/openwrt/.config upload/bin/config_backup
+        
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.event_name == 'watch'
+      with:
+        name: ImmortalWrt Build ${{ env.REPO_BRANCH }}
+        tag_name: immortalwrt-${{ github.run_number }}
+        files: upload/bin/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
